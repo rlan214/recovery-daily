@@ -158,7 +158,7 @@ const KEY='recovery-daily-v1';
 let S={checks:{},log:{},cleared:{},upperOn:{}};
 let sel=new Date(); sel.setHours(0,0,0,0);
 const today=new Date(); today.setHours(0,0,0,0);
-let db=null, ref=null, writing=false, dirty=false, tmr=null;
+let db=null, ref=null, writing=false, dirty=false, tmr=null, savedAt=null;
 const dk=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
 const $=id=>document.getElementById(id);
 const el=(t,c,h)=>{const e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e};
@@ -168,7 +168,8 @@ const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',
 function loadLocal(){try{const r=localStorage.getItem(KEY);if(r)return JSON.parse(r)}catch(e){}return null}
 function saveLocal(){try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){}}
 function norm(o){return Object.assign({checks:{},log:{},cleared:{},upperOn:{}},o||{})}
-function persist(){saveLocal();dirty=true;clearTimeout(tmr);tmr=setTimeout(flush,700)}
+function stamp(){savedAt=new Date();const s=$('saved');if(s)s.textContent='Saved '+savedAt.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})}
+function persist(){saveLocal();stamp();dirty=true;clearTimeout(tmr);tmr=setTimeout(flush,700)}
 async function flush(){
   if(!ref||writing||!dirty)return; writing=true; dirty=false;
   try{await ref.set(JSON.parse(JSON.stringify(S)))}catch(e){dirty=false}
@@ -218,6 +219,36 @@ function phaseFor(d){
   return {w,days,phase:p[1],name:p[2]};
 }
 
+
+/* ---------- backup ---------- */
+async function download(name,text,mime){
+  try{const dl=await claude.use('downloads');if(dl){await dl.save({filename:name,data:new Blob([text],{type:mime})});return}}catch(e){}
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type:mime}));a.download=name;document.body.appendChild(a);a.click();
+  setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1500);
+}
+function stampName(ext){return 'recovery-daily-'+dk(new Date())+'.'+ext}
+function exportJSON(){download(stampName('json'),JSON.stringify({app:'recovery-daily',version:1,exported:new Date().toISOString(),state:S},null,2),'application/json')}
+function exportCSV(){
+  const q=v=>'"'+String(v??'').replace(/"/g,'""')+'"';
+  const rows=[['date','bend_deg','pain_0_10','swelling_vs_yesterday','plan_done_percent','notes']];
+  for(const k of Object.keys(S.log).sort()){const v=S.log[k];const d=new Date(k+'T00:00:00');rows.push([k,v.bend,v.pain,v.swell!=null?SW[v.swell]:'',Math.round(pctFor(d)*100),v.notes])}
+  download(stampName('csv'),rows.map(r=>r.map(q).join(',')).join('\n'),'text/csv');
+}
+function importJSON(file,msg){
+  const r=new FileReader();
+  r.onload=()=>{
+    try{
+      const o=JSON.parse(r.result), s=o&&o.state?o.state:o;
+      if(!s||typeof s!=='object'||(!s.log&&!s.checks))throw new Error('x');
+      const n=norm(s);
+      for(const k of ['checks','log','cleared','upperOn']) S[k]=Object.assign({},S[k],n[k]);
+      persist();render();renderProg();
+      const m=$('impmsg');if(m)m.textContent='Imported '+Object.keys(n.log).length+' log days. Existing days with the same date were replaced by the file.';
+    }catch(e){const m=$('impmsg');if(m)m.textContent='That file could not be read. Choose a file exported from this app.'}
+  };
+  r.readAsText(file);
+}
+
 /* ---------- render ---------- */
 function setCount(id,n){
   const k=dk(sel); S.checks[k]=S.checks[k]||{}; S.checks[k][id]=n; persist(); render();
@@ -260,7 +291,9 @@ function renderCheckin(){
    +'<div><div class="sub" style="margin-bottom:5px;font-weight:500">Swelling compared with yesterday</div><div class="seg" id="sw"></div></div>'
    +'<label class="f" for="notes">Notes<textarea id="notes" placeholder="How the knee felt, anything to tell your PT">'+esc(L.notes||'')+'</textarea></label>'
    +'<label class="sw"><input type="checkbox" id="upc" '+(up?'checked':'')+'> Include upper body and core today</label>';
+  f.insertAdjacentHTML('beforeend','<div class="spacer" style="align-items:center"><button type="button" class="btn" id="savebtn">Save now</button><span class="sub" id="saved">'+(savedAt?'Saved '+savedAt.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'Saves automatically as you type')+'</span></div>');
   box.appendChild(f);
+  f.querySelector('#savebtn').onclick=()=>{clearTimeout(tmr);saveLocal();stamp();dirty=true;flush()};
   const swb=f.querySelector('#sw');
   SW.forEach((s,i)=>{const b=el('button','',s);b.type='button';b.setAttribute('aria-pressed',L.swell===i);b.onclick=()=>{upd({swell:L.swell===i?undefined:i});renderCheckin();advice()};swb.appendChild(b)});
   const bend=f.querySelector('#bend'),pain=f.querySelector('#pain'),notes=f.querySelector('#notes');
@@ -343,6 +376,11 @@ function renderProg(){
     c3.insertAdjacentHTML('beforeend',h+'</table></div>');
   }
   p.appendChild(c3);
+  const c4=el('div','card');
+  c4.innerHTML='<h2>Back up and move your log</h2><p class="sub" style="margin:4px 0 12px">Your entries save on this device. Export a file to keep a copy, send it to your PT, or load it on another phone or computer.</p><div class="spacer"><button class="btn" id="ejson">Export backup (JSON)</button><button class="btn" id="ecsv">Export log (CSV)</button><label class="btn" for="imp" style="display:inline-block">Import backup</label><input id="imp" type="file" accept=".json,application/json" style="position:absolute;opacity:0;width:1px;height:1px"></div><p class="sub" id="impmsg" style="margin:10px 0 0" aria-live="polite"></p>';
+  p.appendChild(c4);
+  c4.querySelector('#ejson').onclick=exportJSON; c4.querySelector('#ecsv').onclick=exportCSV;
+  c4.querySelector('#imp').onchange=e=>{if(e.target.files[0])importJSON(e.target.files[0]);e.target.value=''};
 }
 const TAGN={now:'DO NOW',ask:'ASK FIRST',later:'LATER'};
 const LIBG=[['lying','Lying and seated'],['standing','Standing'],['strength','Strength and stretching'],['upper','Upper body and core']];
